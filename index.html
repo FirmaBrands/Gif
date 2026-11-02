@@ -258,31 +258,25 @@ function lzw(pix,len,minCode,table,lz){
   pre=k}
  emit(pre);emit(eoi);if(sh>0)lz.u8(cur&255)}
 
-async function encode(p,prog){
- cancelled=false;lastY=performance.now();
- const cs=p.cs,w=Math.max(2,Math.round(BW*p.scale)),h=Math.max(2,Math.round(BH*p.scale));
- const m=Math.max(1,Math.round(N*BCS/cs)),map=j=>Math.min(N-1,Math.round(j*cs/BCS));
- const K=Math.max(2,Math.min(255,p.colors-1));
- // palette from evenly spaced sample frames
- const ns=Math.min(m,48),cnt=new Uint32Array(32768),sr=new Float64Array(32768),sg=new Float64Array(32768),sb=new Float64Array(32768);
- let stride=Math.floor(ns*w*h/400000);stride=Math.max(1,stride)|1;
- for(let s=0;s<ns;s++){const j=ns===1?0:Math.round(s*(m-1)/(ns-1)),fr=getFrame(map(j),w,h);
-  for(let q=0;q<w*h;q+=stride){const o=q*3,r=fr[o],g=fr[o+1],b=fr[o+2],key=((r>>3)<<10)|((g>>3)<<5)|(b>>3);cnt[key]++;sr[key]+=r;sg[key]+=g;sb[key]+=b}
-  await maybeYield()}
- const pal0=buildPalette(cnt,sr,sg,sb,K),nc=pal0.length/3,T=nc;
+function samplePalette(cnt,sr,sg,sb,K){
+ const pal0=buildPalette(cnt,sr,sg,sb,K);return pal0}
+
+function makeEncoder(w,h,cs,pal0,loop,dith){
+ const nc=pal0.length/3,T=nc;
  let bits=1;while((1<<bits)<nc+1)bits++;
  const minCode=Math.max(2,bits),tsize=1<<bits,pal=new Uint8Array(tsize*3);pal.set(pal0);
  const cache=new Int16Array(262144).fill(-1);
  const lookup=key=>{const r=((key>>12)&63)*4+2,g=((key>>6)&63)*4+2,b=(key&63)*4+2;let best=0,bd=1e18;
   for(let k=0;k<nc;k++){const dr=r-pal[k*3],dg=g-pal[k*3+1],db=b-pal[k*3+2],d=2*dr*dr+4*dg*dg+3*db*db;if(d<bd){bd=d;best=k}}
   cache[key]=best;return best};
- const dith=!!p.dither,str=0.75,tol=4;
+ const str=0.75,tol=4;
  const ref=new Uint8Array(w*h*3),disp=new Uint8Array(w*h).fill(T),idx=new Uint8Array(w*h),sub=new Uint8Array(w*h);
  let cur=new Float32Array((w+2)*3),nxt=new Float32Array((w+2)*3);
  const table=new Int32Array(4096*(1<<minCode)),lz=new Buf(1<<16),frames=[];
- for(let j=0;j<m;j++){
-  const fr=getFrame(map(j),w,h);let x0=w,x1=-1,y0=h,y1=-1;
-  cur.fill(0);nxt.fill(0);
+ let j=0;
+ function add(fr){
+  let x0=w,x1=-1,y0=h,y1=-1;
+  if(dith){cur.fill(0);nxt.fill(0)}
   for(let y=0;y<h;y++){const dir=(y&1)?-1:1;let x=dir>0?0:w-1;
    for(let c=0;c<w;c++,x+=dir){const q=y*w+x,o=q*3;let r=fr[o],g=fr[o+1],b=fr[o+2];
     if(j>0){const a=r-ref[o],a2=g-ref[o+1],a3=b-ref[o+2];
@@ -299,7 +293,7 @@ async function encode(p,prog){
     if(j>0&&k===disp[q]){idx[q]=T;continue}
     idx[q]=k;disp[q]=k;ref[o]=fr[o];ref[o+1]=fr[o+1];ref[o+2]=fr[o+2];
     if(x<x0)x0=x;if(x>x1)x1=x;if(y<y0)y0=y;if(y>y1)y1=y}
-   const t=cur;cur=nxt;nxt=t;nxt.fill(0)}
+   if(dith){const t=cur;cur=nxt;nxt=t;nxt.fill(0)}}
   if(x1<0){
    if(frames.length){frames[frames.length-1].d+=cs}
    else{frames.push({x:0,y:0,w:1,h:1,d:cs,data:(()=>{lz.n=0;sub[0]=T;lzw(sub,1,minCode,table,lz);return lz.a.slice(0,lz.n)})()})}
@@ -309,24 +303,52 @@ async function encode(p,prog){
    else{for(let y=0;y<fh;y++)sub.set(idx.subarray((y0+y)*w+x0,(y0+y)*w+x0+fw),y*fw);pix=sub}
    lz.n=0;lzw(pix,fw*fh,minCode,table,lz);
    frames.push({x:x0,y:y0,w:fw,h:fh,d:cs,data:lz.a.slice(0,lz.n)})}
-  prog((j+1)/m);await maybeYield()}
- const out=new Buf(1<<18);
- for(const c of'GIF89a')out.u8(c.charCodeAt(0));
- out.u16(w);out.u16(h);out.u8(0x80|(7<<4)|(bits-1));out.u8(0);out.u8(0);out.put(pal);
- if(p.loop){out.u8(0x21);out.u8(0xFF);out.u8(11);for(const c of'NETSCAPE2.0')out.u8(c.charCodeAt(0));out.u8(3);out.u8(1);out.u16(0);out.u8(0)}
- for(const f of frames){
-  out.u8(0x21);out.u8(0xF9);out.u8(4);out.u8(0x05);out.u16(Math.min(65535,f.d));out.u8(T);out.u8(0);
-  out.u8(0x2C);out.u16(f.x);out.u16(f.y);out.u16(f.w);out.u16(f.h);out.u8(0);out.u8(minCode);
-  for(let i=0;i<f.data.length;i+=255){const e=Math.min(f.data.length,i+255);out.u8(e-i);out.put(f.data,i,e)}
-  out.u8(0)}
- out.u8(0x3B);
- return{bytes:out.a.slice(0,out.n),w,h,frames:frames.length,srcFrames:m,colors:nc,cs}}
+  j++}
+ function finish(){
+  const out=new Buf(1<<18);
+  for(const c of'GIF89a')out.u8(c.charCodeAt(0));
+  out.u16(w);out.u16(h);out.u8(0x80|(7<<4)|(bits-1));out.u8(0);out.u8(0);out.put(pal);
+  if(loop){out.u8(0x21);out.u8(0xFF);out.u8(11);for(const c of'NETSCAPE2.0')out.u8(c.charCodeAt(0));out.u8(3);out.u8(1);out.u16(0);out.u8(0)}
+  for(const f of frames){
+   out.u8(0x21);out.u8(0xF9);out.u8(4);out.u8(0x05);out.u16(Math.min(65535,f.d));out.u8(T);out.u8(0);
+   out.u8(0x2C);out.u16(f.x);out.u16(f.y);out.u16(f.w);out.u16(f.h);out.u8(0);out.u8(minCode);
+   for(let i=0;i<f.data.length;i+=255){const e=Math.min(f.data.length,i+255);out.u8(e-i);out.put(f.data,i,e)}
+   out.u8(0)}
+  out.u8(0x3B);
+  return{bytes:out.a.slice(0,out.n),w,h,frames:frames.length,srcFrames:j,colors:nc,cs}}
+ return{add,finish}}
+
+function newHist(){return{cnt:new Uint32Array(32768),sr:new Float64Array(32768),sg:new Float64Array(32768),sb:new Float64Array(32768)}}
+function accum(H,fr,w,h,stride){for(let q=0;q<w*h;q+=stride){const o=q*3,r=fr[o],g=fr[o+1],b=fr[o+2],key=((r>>3)<<10)|((g>>3)<<5)|(b>>3);H.cnt[key]++;H.sr[key]+=r;H.sg[key]+=g;H.sb[key]+=b}}
+const strideFor=(ns,w,h)=>Math.max(1,Math.floor(ns*w*h/400000))|1;
+
+async function encode(p,prog){
+ cancelled=false;lastY=performance.now();
+ const cs=p.cs,w=Math.max(2,Math.round(BW*p.scale)),h=Math.max(2,Math.round(BH*p.scale));
+ const m=Math.max(1,Math.round(N*BCS/cs)),map=j=>Math.min(N-1,Math.round(j*cs/BCS));
+ const K=Math.max(2,Math.min(255,p.colors-1));
+ const ns=Math.min(m,48),H=newHist(),stride=strideFor(ns,w,h);
+ for(let s=0;s<ns;s++){const j=ns===1?0:Math.round(s*(m-1)/(ns-1));accum(H,getFrame(map(j),w,h),w,h,stride);await maybeYield()}
+ const enc=makeEncoder(w,h,cs,buildPalette(H.cnt,H.sr,H.sg,H.sb,K),!!p.loop,!!p.dither);
+ for(let j=0;j<m;j++){enc.add(getFrame(map(j),w,h));prog((j+1)/m);await maybeYield()}
+ return enc.finish()}
+
+let SS=null;
+async function stream(msg){
+ if(msg.type==='sinit'){SS={w:msg.w,h:msg.h,cs:msg.cs,loop:msg.loop,H:newHist(),stride:strideFor(msg.ns,msg.w,msg.h),enc:null};return}
+ if(msg.type==='ssample'){accum(SS.H,new Uint8Array(msg.buf),SS.w,SS.h,SS.stride);return}
+ if(msg.type==='sbuild'){const H=SS.H;SS.enc=makeEncoder(SS.w,SS.h,SS.cs,buildPalette(H.cnt,H.sr,H.sg,H.sb,255),SS.loop,false);SS.H=null;return}
+ if(msg.type==='sframe'){SS.enc.add(new Uint8Array(msg.buf));await maybeYield();return}
+ if(msg.type==='sfinish'){const r=SS.enc.finish();SS=null;return r}}
 
 async function handle(msg,post){
  if(msg.type==='ping')post({type:'pong'});
  else if(msg.type==='init'){F=msg.frames.map(b=>new Uint8Array(b));BW=msg.w;BH=msg.h;BCS=msg.cs;N=F.length;post({type:'ready'})}
  else if(msg.type==='free'){F=null}
  else if(msg.type==='cancel')cancelled=true;
+ else if(/^s(init|sample|build|frame|finish)$/.test(msg.type)){
+  try{cancelled=false;const r=await stream(msg);post(r?{type:'ack',id:msg.id,r}:{type:'ack',id:msg.id},r?[r.bytes.buffer]:[])}
+  catch(e){post({type:'err',id:msg.id,message:String(e&&e.message||e)})}}
  else if(msg.type==='encode'){
   try{const r=await encode(msg.p,f=>post({type:'prog',id:msg.id,f}));post({type:'done',id:msg.id,r},[r.bytes.buffer])}
   catch(e){post({type:'err',id:msg.id,message:String(e&&e.message||e)})}}}
@@ -379,6 +401,14 @@ function encodeOnce(p,onProg){
       else if(m.type==='err')rej(new Error(m.message));
     };
     eng.send({type:'encode',id,p});
+  });
+}
+
+function rpc(msg,tr){
+  return new Promise((res,rej)=>{
+    const id=++reqId;
+    engCb=m=>{if(m.id!==id)return;if(m.type==='ack')res(m.r);else if(m.type==='err')rej(new Error(m.message))};
+    eng.send({...msg,id},tr||[]);
   });
 }
 
@@ -459,7 +489,7 @@ function estimateFps(v){
     const fin=()=>{if(done)return;done=true;try{v.pause()}catch(e){}
       if(t.length<4)return res(null);
       const d=[];for(let i=1;i<t.length;i++){const x=t[i]-t[i-1];if(x>.001)d.push(x)}
-      d.sort((a,b)=>a-b);res(d.length?1/d[d.length>>1]:null)};
+      d.sort((a,b)=>a-b);res(d.length?1/d[d.length>>2]:null)};
     const cb=(n,md)=>{t.push(md.mediaTime);if(t.length>=14)fin();else v.requestVideoFrameCallback(cb)};
     v.muted=true;v.currentTime=0;
     const pr=v.play();
@@ -494,19 +524,47 @@ function seek(v,t){return new Promise(res=>{
   if(Math.abs(v.currentTime-t)<.0005&&v.readyState>=2)return res();
   const to=setTimeout(done,3000);function done(){clearTimeout(to);v.removeEventListener('seeked',done);res()}
   v.addEventListener('seeked',done);v.currentTime=t})}
-async function extract(t0,t1,cs,n,w,h,onP){
+function makeGrabber(w,h,t0,t1,step){
   const c=document.createElement('canvas');c.width=w;c.height=h;
   const x=c.getContext('2d',{willReadFrequently:true});x.imageSmoothingQuality='high';
-  const out=[],step=cs/100;
-  for(let k=0;k<n;k++){
+  return async k=>{
     if(S.cancel)throw new Error('cancelled');
     await seek(vid,Math.min(t0+k*step,Math.max(t0,t1-.002)));
     x.drawImage(vid,0,0,w,h);
     const d=x.getImageData(0,0,w,h).data,rgb=new Uint8Array(w*h*3);
     for(let i=0,j=0;i<d.length;i+=4,j+=3){rgb[j]=d[i];rgb[j+1]=d[i+1];rgb[j+2]=d[i+2]}
-    out.push(rgb);onP((k+1)/n);
-  }
+    return rgb;
+  };
+}
+async function extract(t0,t1,cs,n,w,h,onP){
+  const grab=makeGrabber(w,h,t0,t1,cs/100),out=[];
+  for(let k=0;k<n;k++){out.push(await grab(k));onP((k+1)/n)}
   return out;
+}
+// No size limit: stream frame by frame at the original size and the source frame rate; nothing is held in memory.
+async function convertStream(it,P){
+  const m=it.meta,t0=0,t1=m.dur,dur=t1-t0;
+  const fps=(it.fpsP&&await it.fpsP)||60;
+  const cs=Math.max(topCsFor(fps),CFG.fps.max);
+  const w=Math.max(2,Math.min(m.w,CFG.size.max||1e9)),h=Math.max(2,Math.round(m.h*w/m.w));
+  const n=Math.max(1,Math.ceil(dur*100/cs-1e-6)),ns=Math.min(n,40);
+  const grab=makeGrabber(w,h,t0,t1,cs/100);
+  const e=await getEngine();
+  await rpc({type:'sinit',w,h,cs,loop:true,ns});
+  for(let s=0;s<ns;s++){
+    const k=ns===1?0:Math.round(s*(n-1)/(ns-1)),rgb=await grab(k);
+    await rpc({type:'ssample',buf:rgb.buffer},[rgb.buffer]);
+    P(.1*(s+1)/ns,'Preparing colors')}
+  await rpc({type:'sbuild'});
+  let pending=Promise.resolve();
+  for(let k=0;k<n;k++){
+    const rgb=await grab(k);
+    await pending;
+    pending=rpc({type:'sframe',buf:rgb.buffer},[rgb.buffer]);
+    P(.1+.88*(k+1)/n,'Encoding '+Math.round((k+1)/n*100)+'%')}
+  await pending;
+  const r=await rpc({type:'sfinish'});
+  return{r,fits:true};
 }
 
 /* ---------- convert ---------- */
@@ -524,9 +582,10 @@ async function convert(it,idx,total,limit){
   const P=(f,txt)=>prog((idx+f)/total,tag+txt);
   vid.src=it.url;
   await new Promise(res=>{const to=setTimeout(res,8000);vid.onloadeddata=()=>{clearTimeout(to);res()}});
+  if(!isFinite(limit))return convertStream(it,P);
   const m=it.meta,t0=0,t1=m.dur,dur=t1-t0;
   const fps=(it.fpsP&&await it.fpsP)||30;
-  const topCs=topCsFor(fps),maxW=Math.min(m.w,1280,CFG.size.max||1e9),minW=Math.min(maxW,480);
+  const topCs=topCsFor(fps),maxW=Math.min(m.w,CFG.size.max||1e9),minW=Math.min(maxW,480);
   let cs=topCs,n=1,bw=m.w;
   for(const c of fpsLadder(topCs)){
     cs=c;n=Math.max(1,Math.ceil(dur*100/c-1e-6));
